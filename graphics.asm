@@ -97,8 +97,9 @@ section .bss
         .y                  resd 1
         .gamma_size         resd 1
         .mode_valid         resd 1
-        .mode               resq 1 ; <-- CHANGED: directive is now on the same line
-                            ; pointer to a drm_mode_modeinfo struct
+        .mode               ; This is a full drm_mode_modeinfo struct
+                            ; We'll just point it to the mode_info buffer for simplicity
+                            resq 1 ; pointer to mode_info
 
     ; struct drm_mode_card_res
     res:
@@ -199,7 +200,22 @@ _start:
     ; ================================================
     ; First, get the mmap offset for our dumb buffer
     ; struct drm_mode_map_dumb { handle, pad, offset }
-    ; We'll reuse the 'connector' bss space for the struct to avoid stack issues.
+    push qword [fb_handle] ; Push handle onto stack for the struct
+    push 0                 ; Pad
+    mov r10, rsp           ; r10 points to our on-stack struct
+
+    mov rax, SYS_IOCTL
+    mov rdi, [drm_fd]
+    mov rsi, DRM_IOCTL_MODE_MAP_DUMB
+    mov rdx, r10
+    syscall
+    add rsp, 16            ; Clean up stack
+    test rax, rax
+    js _error
+
+    ; The offset is now in the second qword of where r10 was pointing.
+    ; Since we used the stack, we need to retrieve it. Let's re-do with .bss
+    ; to be clearer. We'll reuse the 'connector' bss space.
     mov dword [connector], [fb_handle] ; Use first 4 bytes for handle
     mov rax, SYS_IOCTL
     mov rdi, [drm_fd]
@@ -234,7 +250,7 @@ _start:
     ; struct drm_mode_crtc
     ; { set_connectors_ptr, count_connectors, crtc_id, fb_id, x, y,
     ;   gamma_size, mode_valid, mode }
-    ; We'll build this on the stack.
+    ; We'll build this on the stack as well.
     sub rsp, 64         ; Allocate space for the struct on stack
     mov rdx, rsp        ; rdx points to the struct
 
@@ -286,6 +302,10 @@ _start:
     ; ================================================
 _cleanup:
     ; Restore the original CRTC settings
+    mov rdx, original_crtc
+    mov rax, [connector_id]
+    mov [rdx], rax ; set_connectors_ptr (this is wrong, it needs a pointer to id)
+                   ; Let's fix this properly.
     push [connector_id]
     mov r10, rsp
     mov [original_crtc.set_connectors_ptr], r10
@@ -533,16 +553,11 @@ draw_gradient:
     shl r8, 8
     shr r8, 8
 
-    ; --- START OF CHANGED BLOCK ---
-    ; Correctly and safely build the 32-bit color 0x00RRGGBB
-    ; R = r9b, G = r8b, B = 128
-    movzx eax, r9b    ; eax = 0x000000RR (Red)
-    shl eax, 8        ; eax = 0x0000RR00
-    movzx ebx, r8b    ; ebx = 0x000000GG (Green)
-    or eax, ebx       ; eax = 0x0000RRGG
-    shl eax, 8        ; eax = 0x00RRGG00
-    or al, 128        ; eax = 0x00RRGGBB (Blue)
-    ; --- END OF CHANGED BLOCK ---
+    mov eax, 0                      ; Start with 0x00000000
+    mov al, 128                     ; B = 128 (constant blue)
+    mov ah, r8b                     ; G
+    shl eax, 8
+    mov al, r9b                     ; R
 
     ; Calculate pixel address: base + (y * pitch) + (x * 4)
     mov rbx, r11
